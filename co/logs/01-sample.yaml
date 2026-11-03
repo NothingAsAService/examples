@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meomeo-ns
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hotrod-load-scripts
+  namespace: meomeo-ns
+data:
+  curls.sh: |
+    #!/bin/sh
+    BASE_URL="http://localhost:8080"
+    CUSTOMERS="123 392 731 567"
+    SESSION=0
+    nonse() {
+      od -An -N4 -tu4 /dev/urandom | awk '{printf "0.%s", $1}'
+    }
+    rand_int() {
+      od -An -N1 -tu1 /dev/urandom | awk -v m="$1" '{print $1 % m}'
+    }
+    hotrod_curl() {
+      url="$1"
+      shift
+      curl -s "$url" \
+        -H 'Accept: */*' \
+        -H 'Referer: http://hotrod.local/' \
+        -H 'X-Requested-With: XMLHttpRequest' \
+        "$@"
+    }
+    while true; do
+      COUNT=5
+      SESSION=$((SESSION + 1))
+      echo "Session $SESSION: spamming $COUNT concurrent requests"
+      i=1
+      while [ "$i" -le "$COUNT" ]; do
+        BAGGAGE="baggage: session=$SESSION, request=$SESSION-$i"
+        if [ "$(rand_int 2)" = "0" ]; then
+          hotrod_curl \
+            "$BASE_URL/config?nonse=$(nonse)" \
+            -H "$BAGGAGE" &
+        else
+          CUSTOMER=$(echo "$CUSTOMERS" | awk -v idx="$(rand_int 4)" '{print $(idx+1)}')
+          hotrod_curl \
+            "$BASE_URL/dispatch?customer=$CUSTOMER&nonse=$(nonse)" \
+            -H "$BAGGAGE" &
+        fi
+        i=$((i + 1))
+      done
+      wait
+    done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hotrod
+  namespace: meomeo-ns
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hotrod
+  template:
+    metadata:
+      labels:
+        app: hotrod
+    spec:
+      containers:
+        - name: hotrod
+          image: jaegertracing/example-hotrod:latest
+          args:
+            - all
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 8083
+          resources:
+            requests:
+              cpu: 100m
+              memory: 100Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+        - name: load
+          image: curlimages/curl:latest
+          command:
+            - sh
+            - /scripts/curls.sh
+          volumeMounts:
+            - name: load-scripts
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 100m
+              memory: 100Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+      volumes:
+        - name: load-scripts
+          configMap:
+            name: hotrod-load-scripts
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hotrod
+  namespace: meomeo-ns
+spec:
+  selector:
+    app: hotrod
+  ports:
+    - name: ui
+      port: 8080
+      targetPort: 8080
+    - name: admin
+      port: 8083
+      targetPort: 8083
+---

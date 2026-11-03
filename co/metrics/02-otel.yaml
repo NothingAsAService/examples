@@ -1,0 +1,248 @@
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: co-metrics
+# ============================================================
+# RBAC
+# ============================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: co-metrics
+  namespace: co-metrics
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: co-metrics
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/metrics
+      - nodes/stats
+      - pods
+      - namespaces
+      - services
+      - endpoints
+      - persistentvolumes
+      - persistentvolumeclaims
+      - resourcequotas
+      - replicationcontrollers
+      - events
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: co-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: co-metrics
+subjects:
+  - kind: ServiceAccount
+    name: co-metrics
+    namespace: co-metrics
+# ============================================================
+# DAEMONSET CONFIG
+# ============================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-ds-config
+  namespace: co-metrics
+data:
+  otelcol.yaml: |
+    receivers:
+      host_metrics:
+        collection_interval: 15s
+        root_path: /hostfs
+        scrapers:
+          cpu:
+          memory:
+          disk:
+          filesystem:
+          load:
+          network:
+      kubelet_stats:
+        collection_interval: 15s
+        auth_type: serviceAccount
+        endpoint: https://${env:K8S_NODE_IP}:10250
+        insecure_skip_verify: true
+        metric_groups:
+          - node
+          - pod
+          - container
+          - volume
+    processors:
+      batch:
+        timeout: 10s
+        send_batch_size: 1000
+    exporters:
+      prometheus_remote_write:
+        endpoint: https://ingest-vnc1.viettelcloud.vn:8443/monitoring
+        headers:
+          X-CloudObser-Key: "<co_token>"
+        resource_to_telemetry_conversion:
+          enabled: true
+      debug:
+        verbosity: detailed
+    service:
+      pipelines:
+        metrics:
+          receivers:
+            - host_metrics
+            - kubelet_stats
+          processors:
+            - batch
+          exporters:
+            - prometheus_remote_write
+            - debug
+# ============================================================
+# DAEMONSET
+# ============================================================
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: co-metrics
+  namespace: co-metrics
+spec:
+  selector:
+    matchLabels:
+      app: co-metrics
+      deploy-type: ds
+  template:
+    metadata:
+      labels:
+        app: co-metrics
+        deploy-type: ds
+    spec:
+      serviceAccountName: co-metrics
+      containers:
+        - name: co-metrics
+          image: otel/opentelemetry-collector-contrib:0.161.0
+          args:
+            - --config=/etc/otelcol/otelcol.yaml
+          env:
+            - name: K8S_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+            - name: hostfs
+              mountPath: /hostfs
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: otel-ds-config
+        - name: hostfs
+          hostPath:
+            path: /
+# ============================================================
+# DEPLOYMENT CONFIG
+# ============================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-cluster-config
+  namespace: co-metrics
+data:
+  otelcol.yaml: |
+    receivers:
+      k8s_cluster:
+        collection_interval: 30s
+        node_conditions_to_report:
+          - Ready
+          - MemoryPressure
+          - DiskPressure
+          - PIDPressure
+        allocatable_types_to_report:
+          - cpu
+          - memory
+          - pods
+    processors:
+      batch:
+        timeout: 10s
+        send_batch_size: 1000
+    exporters:
+      prometheus_remote_write:
+        endpoint: https://ingest-vnc1.viettelcloud.vn:8443/monitoring
+        headers:
+          X-CloudObser-Key: "<co_token>"
+        resource_to_telemetry_conversion:
+          enabled: true
+      debug:
+        verbosity: detailed
+    service:
+      pipelines:
+        metrics:
+          receivers:
+            - k8s_cluster
+          processors:
+            - batch
+          exporters:
+            - prometheus_remote_write
+            - debug
+# ============================================================
+# DEPLOYMENT
+# ============================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: co-metrics
+  namespace: co-metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: co-metrics
+      deploy-type: deploy
+  template:
+    metadata:
+      labels:
+        app: co-metrics
+        deploy-type: deploy
+    spec:
+      serviceAccountName: co-metrics
+      containers:
+        - name: otel
+          image: otel/opentelemetry-collector-contrib:0.161.0
+          args:
+            - --config=/etc/otelcol/otelcol.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: otel-cluster-config
